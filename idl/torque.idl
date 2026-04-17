@@ -1,0 +1,5 @@
+struct Torque
+{
+    unsigned long index;
+    unsigned long torque;
+};
