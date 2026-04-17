@@ -1,0 +1,3 @@
+[submodule "Drivers/DM_LinkX_Driver"]
+	path = Drivers/DM_LinkX_Driver
+	url = git@github.com:SillyBeee/DM_LinkX_ROS_Driver.git

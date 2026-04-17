@@ -17,6 +17,8 @@ endif()
 
 
 add_subdirectory(DMW)  #DDS Middle Ware
+add_subdirectory(Drivers)
+add_subdirectory(Core)
 
 
 
