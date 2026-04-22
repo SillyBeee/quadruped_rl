@@ -7,6 +7,7 @@ endif()
 if(NOT fastdds_FOUND)
     find_package(fastdds 3 REQUIRED)
 endif()
+find_package(nlohmann_json 3 REQUIRED)
 
 # Sources and public headers
 file(GLOB DMW_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
@@ -47,6 +48,7 @@ target_link_libraries(dmw_core
     PUBLIC
         fastdds
         fastcdr
+        nlohmann_json::nlohmann_json
 )
 
 add_dependencies(dmw_core generate_dds_types)
