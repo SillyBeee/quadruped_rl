@@ -46,6 +46,7 @@ target_link_libraries(dmw_core
         fastdds
         fastcdr
         nlohmann_json::nlohmann_json
+        Drivers::Logger
 )
 
 add_dependencies(dmw_core generate_dds_types)

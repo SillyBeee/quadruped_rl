@@ -4,6 +4,11 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+
 namespace logger {
 
 Logger &Logger::GetInstance() {
@@ -31,12 +36,19 @@ void Logger::Init(const LogLevel _console_level, const LogLevel _file_level,
 
   sinks_.push_back(console_sink);
 
-  // 可选文件 sink（带滚动）
-  if (!_filename.empty()) {
+  // 文件 sink（带滚动）
+  std::string filename = _filename;
+  if (filename.empty() && _file_level != LogLevel::OFF) {
+    std::filesystem::create_directories("log");
+    auto now = std::time(nullptr);
+    std::stringstream ss;
+    ss << "log/app_" << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S") << ".log";
+    filename = ss.str();
+  }
+  if (!filename.empty()) {
     auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        _filename, _max_size, _max_files);
+        filename, _max_size, _max_files);
     file_sink->set_level(ConvertLevel(_file_level));
-    // 文件不需要颜色
     file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%s:%#] %v");
     sinks_.push_back(file_sink);
   }

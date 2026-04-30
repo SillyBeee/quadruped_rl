@@ -6,6 +6,7 @@
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/subscriber/qos/SubscriberQos.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
+#include "logger.hpp"
 
 namespace DMW {
 
@@ -39,7 +40,10 @@ public:
         //create topic
         eprosima::fastdds::dds::TopicQos topic_qos = eprosima::fastdds::dds::TOPIC_QOS_DEFAULT;
         node_->Get_Participant()->get_default_topic_qos(topic_qos);
-        topic_ = node_->Get_Participant()->create_topic(topic_name_.c_str(), type_name_.c_str(), topic_qos, nullptr, eprosima::fastdds::dds::StatusMask::none());
+        topic_ = node_->Get_Participant()->find_topic(topic_name_, eprosima::fastdds::dds::Duration_t(1, 0));
+        if (topic_ == nullptr) {
+            topic_ = node_->Get_Participant()->create_topic(topic_name_.c_str(), type_name_.c_str(), topic_qos, nullptr, eprosima::fastdds::dds::StatusMask::none());
+        }
         if (topic_ == nullptr) {
             throw std::runtime_error("Topic initialization failed");
         }
@@ -73,14 +77,12 @@ public:
         if (info.current_count_change == 1) {
             matched_ = info.current_count;
             cv_.notify_one();
-            std::cout << "Subscriber matched." << std::endl;
+            LOG_INFO("Subscriber matched.");
         } else if (info.current_count_change == -1) {
             matched_ = info.current_count;
-            std::cout << "Subscriber unmatched." << std::endl;
+            LOG_INFO("Subscriber unmatched.");
         } else {
-            std::cout << info.current_count_change
-                      << " is not a valid value for SubscriptionMatchedStatus current count change"
-                      << std::endl;
+            LOG_ERROR("{} is not a valid value for SubscriptionMatchedStatus current count change", info.current_count_change);
         }
     }
 
@@ -90,8 +92,7 @@ public:
                 if (callback_) {
                     if (this->multi_pub_protect_) {
                         if (matched_ > 1) {
-                            std::cout << "detect multiple publisher publish same topic message ."
-                                      << std::endl;
+                            LOG_INFO("Detect multiple publisher publish same topic message.");
                         } else {
                             callback_(current_message_);
                         }

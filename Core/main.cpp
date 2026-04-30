@@ -2,14 +2,20 @@
 #include <string>
 #include <vector>
 
-#include "dds_node.hpp"
-#include "dds_sub.hpp"
 #include "logger.hpp"
 #include "serial_driver.hpp"
 #include "dclcpp.hpp"  
 #include "torquePubSubTypes.hpp"
+#include "functional"
+#include <csignal>
+#include "thread"
 
 int main() {
+    signal(SIGINT, [](int signum) {
+        LOG_INFO("Interrupt signal ({}) received. Exiting...", signum);
+        std::exit(signum);
+    });
+    
     // 1) Logger
     logger::Logger::GetInstance().Init(
         logger::LogLevel::INFO,
@@ -35,10 +41,26 @@ int main() {
         LOG_INFO("Write {} bytes to {}", n, dev);
         serial.Close();
     }
-    DMW::DdsNode node (111,0);
+    std::shared_ptr<DMW::DdsNode> node = std::make_shared<DMW::DdsNode>(111,0);
+
+    auto callback = [](const Torque& msg) {
+        LOG_INFO("Received message: torque = {}", msg.torque());
+    };
 
     
-    // DMW::DdsSubscription<TorquePubSubType> sub (node,"/test_topic",);
+    DMW::DdsSubscription<TorquePubSubType> sub (node,"/test_topic",std::bind(callback, std::placeholders::_1), true);
+
+    DMW::DdsPublisher<TorquePubSubType> pub(node, "/test_topic");
+
+
+    while(1){
+        Torque msg;
+        msg.torque(123.45);
+        pub.Publish(msg);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+
 
 
     LOG_INFO("DMW header included successfully");
