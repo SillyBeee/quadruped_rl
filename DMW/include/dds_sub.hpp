@@ -18,17 +18,16 @@ public:
         node_(node),
         callback_(callback),
         multi_pub_protect_(multi_pub_protect) {
-
-        this->type_ = eprosima::fastdds::dds::TypeSupport(new MsgType());
+        this->type_ = eprosima::fastdds::dds::TypeSupport(new MsgSubType());
         this->topic_name_ = topic_name;
-        this->type_name_ = this->type_->get_type_name();
-        if(node_->Is_ROS_Compatible()) {
+        this->type_name_ = this->type_.get_type_name();
+        if (node_->Is_ROS_Compatible()) {
             this->topic_name_ = DMW::utils::ros_topic_mangling(topic_name, DMW::utils::RosTopicType::TOPIC);
             this->type_name_ = DMW::utils::ros_datatype_mangling(this->type_name_);
         }
 
-        type_.register_type(node_->Get_Participant(),type_name_.c_str());
-        
+        type_.register_type(node_->Get_Participant(), type_name_.c_str());
+
         //create subscriber
         eprosima::fastdds::dds::SubscriberQos qos = eprosima::fastdds::dds::SUBSCRIBER_QOS_DEFAULT;
         node_->Get_Participant()->get_default_subscriber_qos(qos);
@@ -58,26 +57,67 @@ public:
         }
     }
 
-    ~DdsSubscription(){
-        if(reader_ != nullptr) {
+    ~DdsSubscription() {
+        if (reader_ != nullptr) {
             subscriber_->delete_datareader(reader_);
         }
-        if(topic_ != nullptr) {
+        if (topic_ != nullptr) {
             node_->Get_Participant()->delete_topic(topic_);
         }
-        if(subscriber_ != nullptr) {
+        if (subscriber_ != nullptr) {
             node_->Get_Participant()->delete_subscriber(subscriber_);
         }
     }
 
+    void on_subscription_matched(eprosima::fastdds::dds::DataReader* reader, const eprosima::fastdds::dds::SubscriptionMatchedStatus& info) {
+        if (info.current_count_change == 1) {
+            matched_ = info.current_count;
+            cv_.notify_one();
+            std::cout << "Subscriber matched." << std::endl;
+        } else if (info.current_count_change == -1) {
+            matched_ = info.current_count;
+            std::cout << "Subscriber unmatched." << std::endl;
+        } else {
+            std::cout << info.current_count_change
+                      << " is not a valid value for SubscriptionMatchedStatus current count change"
+                      << std::endl;
+        }
+    }
+
+    void on_data_available(eprosima::fastdds::dds::DataReader* reader) {
+        while (eprosima::fastdds::dds::RETCODE_OK == reader->take_next_sample(&current_message_, &current_message_info_)) {
+            if ((current_message_info_.instance_state == eprosima::fastdds::dds::ALIVE_INSTANCE_STATE) && current_message_info_.valid_data) {
+                if (callback_) {
+                    if (this->multi_pub_protect_) {
+                        if (matched_ > 1) {
+                            std::cout << "detect multiple publisher publish same topic message ."
+                                      << std::endl;
+                        } else {
+                            callback_(current_message_);
+                        }
+                    } else {
+                        callback_(current_message_);
+                    }
+                }
+            }
+        }
+    }
+
+    int32_t Get_Matched() {
+        return matched_;
+    }
+
 private:
-    eprosima::fastdds::dds::Subscriber* subscriber_;
-    eprosima::fastdds::dds::Topic* topic_;
-    eprosima::fastdds::dds::DataReader* reader_;
-    eprosima::fastdds::dds::TypeSupport type_;
+    eprosima::fastdds::dds::Subscriber* subscriber_; // Subscriber
+    eprosima::fastdds::dds::Topic* topic_;           // Topic
+    eprosima::fastdds::dds::DataReader* reader_;     // DataReader
+    eprosima::fastdds::dds::TypeSupport type_;       // TypeSupport for the message type
     std::string topic_name_;
     std::string type_name_;
-    
+
+    MsgType current_message_;
+    eprosima::fastdds::dds::SampleInfo current_message_info_;
+    bool matched_ = 0;
 
     std::condition_variable cv_;
     std::mutex mutex_;

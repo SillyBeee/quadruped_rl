@@ -9,9 +9,6 @@ if(NOT fastdds_FOUND)
 endif()
 find_package(nlohmann_json 3 REQUIRED)
 
-# Sources and public headers
-file(GLOB DMW_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-
 # IDL generation
 find_program(FASTDDSGEN_EXECUTABLE fastddsgen)
 if(NOT FASTDDSGEN_EXECUTABLE)
@@ -34,25 +31,25 @@ add_custom_command(
 
 add_custom_target(generate_dds_types DEPENDS "${FASTDDS_GEN_DIR}/.dds_generated.stamp")
 
-# DMW core library
-add_library(dmw_core STATIC ${DMW_SOURCES})
+# DMW core library (header-only)
+add_library(dmw_core INTERFACE)
 add_library(DMW::Core ALIAS dmw_core)
 
 target_include_directories(dmw_core
-    PUBLIC
+    INTERFACE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${FASTDDS_GEN_DIR}"
 )
 
 target_link_libraries(dmw_core
-    PUBLIC
+    INTERFACE
         fastdds
         fastcdr
         nlohmann_json::nlohmann_json
 )
 
 add_dependencies(dmw_core generate_dds_types)
-target_compile_features(dmw_core PUBLIC cxx_std_17)
+target_compile_features(dmw_core INTERFACE cxx_std_17)
 
 # Export generated directory to parent scope so top-level CMake can use it
 set(GENERATED_DDS_DIR "${FASTDDS_GEN_DIR}" PARENT_SCOPE)

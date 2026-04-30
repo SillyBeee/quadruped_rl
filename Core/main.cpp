@@ -2,9 +2,12 @@
 #include <string>
 #include <vector>
 
+#include "dds_node.hpp"
+#include "dds_sub.hpp"
 #include "logger.hpp"
 #include "serial_driver.hpp"
 #include "dclcpp.hpp"  
+#include "torquePubSubTypes.hpp"
 
 int main() {
     // 1) Logger
@@ -32,10 +35,12 @@ int main() {
         LOG_INFO("Write {} bytes to {}", n, dev);
         serial.Close();
     }
+    DMW::DdsNode node (111,0);
 
-    // 3) DMW
-    // 当前 DMW 仅有头文件包含，尚无可实例化接口。
-    // 这里先证明 Core 已接入 DMW 头文件依赖。
+    
+    // DMW::DdsSubscription<TorquePubSubType> sub (node,"/test_topic",);
+
+
     LOG_INFO("DMW header included successfully");
 
     return 0;
