@@ -6,6 +6,7 @@ import argparse
 import math
 import sys
 import time
+import tempfile
 import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import mujoco
 import mujoco.viewer
 import numpy as np
+import trimesh
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -52,6 +54,13 @@ class InertialSpec:
     mass: float
     pos: Tuple[float, float, float]
     fullinertia: Tuple[float, float, float, float, float, float]
+
+
+@dataclass(frozen=True)
+class MeshAssetSpec:
+    source_path: Path
+    scale: Tuple[float, float, float]
+    export_path: Path
 
 
 def parse_float_list(value: Optional[str], expected: int) -> Tuple[float, ...]:
@@ -116,6 +125,81 @@ def parse_inertial(link: ET.Element) -> Optional[InertialSpec]:
         float(inertia_elem.attrib.get("iyz", "0")),
     )
     return InertialSpec(mass=mass, pos=origin_xyz, fullinertia=fullinertia)
+
+
+def parse_materials(robot: ET.Element) -> Dict[str, Tuple[float, float, float, float]]:
+    materials: Dict[str, Tuple[float, float, float, float]] = {}
+    for material in robot.findall("material"):
+        name = material.attrib.get("name")
+        color_elem = material.find("color")
+        if not name or color_elem is None:
+            continue
+        rgba = color_elem.attrib.get("rgba")
+        if rgba is None:
+            continue
+        materials[name] = parse_float_list(rgba, 4)
+    return materials
+
+
+def resolve_mesh_source(filename: str, package_dir: Path) -> Path:
+    raw_path = filename
+    if raw_path.startswith("file://"):
+        raw_path = raw_path[len("file://"):]
+    if raw_path.startswith("package://"):
+        raw_path = raw_path.split("/", 2)[-1]
+
+    mesh_name = Path(raw_path).name
+    direct_path = package_dir / "meshes" / mesh_name
+    if direct_path.exists():
+        return direct_path
+
+    absolute_path = Path(raw_path)
+    if absolute_path.exists():
+        return absolute_path
+
+    for candidate in (package_dir / "meshes").rglob(mesh_name):
+        return candidate
+
+    return direct_path
+
+
+def export_mesh_as_obj(source_path: Path, scale: Tuple[float, float, float], export_dir: Path) -> Path:
+    export_dir.mkdir(parents=True, exist_ok=True)
+    mesh_or_scene = trimesh.load(source_path, force="mesh", process=False)
+    if isinstance(mesh_or_scene, trimesh.Scene):
+        geometries = [geometry for geometry in mesh_or_scene.dump() if geometry is not None]
+        if not geometries:
+            raise RuntimeError(f"failed to load mesh scene from {source_path}")
+        mesh = trimesh.util.concatenate(geometries)
+    else:
+        mesh = mesh_or_scene
+
+    mesh = mesh.copy()
+    mesh.apply_scale(scale)
+
+    scale_tag = "_".join(f"{value:.4g}" for value in scale)
+    export_path = export_dir / f"{source_path.stem}_{scale_tag}.obj"
+    mesh.export(export_path)
+    return export_path
+
+
+def visual_rgba(visual_elem: ET.Element, materials: Dict[str, Tuple[float, float, float, float]]) -> Tuple[float, float, float, float]:
+    default_rgba = (0.8, 0.8, 0.8, 1.0)
+    material_elem = visual_elem.find("material")
+    if material_elem is None:
+        return default_rgba
+
+    rgba_elem = material_elem.find("color")
+    if rgba_elem is not None:
+        rgba = rgba_elem.attrib.get("rgba")
+        if rgba is not None:
+            return parse_float_list(rgba, 4)
+
+    material_name = material_elem.attrib.get("name")
+    if material_name and material_name in materials:
+        return materials[material_name]
+
+    return default_rgba
 
 
 def discover_models() -> List[RobotModel]:
@@ -249,6 +333,7 @@ def collision_geoms(link: ET.Element) -> List[Tuple[str, Dict[str, str]]]:
                     "size": format_vec(value * 0.5 for value in size),
                     "pos": format_vec(origin_xyz),
                     "quat": format_vec(origin_quat),
+                    "rgba": "0.5 0.5 0.5 0.12",
                 },
             )
         elif (cylinder := geom_elem.find("cylinder")) is not None:
@@ -260,6 +345,7 @@ def collision_geoms(link: ET.Element) -> List[Tuple[str, Dict[str, str]]]:
                     "size": format_vec((radius, length * 0.5)),
                     "pos": format_vec(origin_xyz),
                     "quat": format_vec(origin_quat),
+                    "rgba": "0.5 0.5 0.5 0.12",
                 },
             )
         elif (sphere := geom_elem.find("sphere")) is not None:
@@ -270,6 +356,7 @@ def collision_geoms(link: ET.Element) -> List[Tuple[str, Dict[str, str]]]:
                     "size": f"{radius:.8g}",
                     "pos": format_vec(origin_xyz),
                     "quat": format_vec(origin_quat),
+                    "rgba": "0.5 0.5 0.5 0.12",
                 },
             )
         elif geom_elem.find("capsule") is not None:
@@ -283,6 +370,7 @@ def collision_geoms(link: ET.Element) -> List[Tuple[str, Dict[str, str]]]:
                     "size": format_vec((radius, length * 0.5)),
                     "pos": format_vec(origin_xyz),
                     "quat": format_vec(origin_quat),
+                    "rgba": "0.5 0.5 0.5 0.12",
                 },
             )
         else:
@@ -294,12 +382,127 @@ def collision_geoms(link: ET.Element) -> List[Tuple[str, Dict[str, str]]]:
     return geoms
 
 
-def build_mjcf(model: RobotModel, spawn_xyz: Tuple[float, float, float], spawn_yaw: float) -> str:
+def visual_geoms(
+    link: ET.Element,
+    package_dir: Path,
+    materials: Dict[str, Tuple[float, float, float, float]],
+    mesh_asset_root: ET.Element,
+    mesh_assets: Dict[Tuple[str, Tuple[float, float, float]], str],
+    export_dir: Path,
+) -> List[Tuple[str, Dict[str, str]]]:
+    geoms: List[Tuple[str, Dict[str, str]]] = []
+    for visual in link.findall("visual"):
+        origin_xyz, origin_quat = parse_origin(visual.find("origin"))
+        rgba = visual_rgba(visual, materials)
+        geom_elem = visual.find("geometry")
+        if geom_elem is None:
+            continue
+
+        geom: Optional[Tuple[str, Dict[str, str]]] = None
+        if (mesh_elem := geom_elem.find("mesh")) is not None:
+            filename = mesh_elem.attrib.get("filename")
+            if not filename:
+                continue
+            scale = parse_float_list(mesh_elem.attrib.get("scale", "1 1 1"), 3)
+            source_path = resolve_mesh_source(filename, package_dir)
+            asset_key = (str(source_path), scale)
+            mesh_name = mesh_assets.get(asset_key)
+            if mesh_name is None:
+                mesh_name = f"mesh_{len(mesh_assets) + 1}"
+                export_path = export_mesh_as_obj(source_path, scale, export_dir)
+                ET.SubElement(mesh_asset_root, "mesh", name=mesh_name, file=str(export_path))
+                mesh_assets[asset_key] = mesh_name
+
+            geom = (
+                "mesh",
+                {
+                    "mesh": mesh_name,
+                    "pos": format_vec(origin_xyz),
+                    "quat": format_vec(origin_quat),
+                    "rgba": format_vec(rgba),
+                    "contype": "0",
+                    "conaffinity": "0",
+                },
+            )
+        elif (box := geom_elem.find("box")) is not None:
+            size = parse_float_list(box.attrib.get("size"), 3)
+            geom = (
+                "box",
+                {
+                    "size": format_vec(value * 0.5 for value in size),
+                    "pos": format_vec(origin_xyz),
+                    "quat": format_vec(origin_quat),
+                    "rgba": format_vec(rgba),
+                    "contype": "0",
+                    "conaffinity": "0",
+                },
+            )
+        elif (cylinder := geom_elem.find("cylinder")) is not None:
+            radius = float(cylinder.attrib["radius"])
+            length = float(cylinder.attrib["length"])
+            geom = (
+                "cylinder",
+                {
+                    "size": format_vec((radius, length * 0.5)),
+                    "pos": format_vec(origin_xyz),
+                    "quat": format_vec(origin_quat),
+                    "rgba": format_vec(rgba),
+                    "contype": "0",
+                    "conaffinity": "0",
+                },
+            )
+        elif (sphere := geom_elem.find("sphere")) is not None:
+            radius = float(sphere.attrib["radius"])
+            geom = (
+                "sphere",
+                {
+                    "size": f"{radius:.8g}",
+                    "pos": format_vec(origin_xyz),
+                    "quat": format_vec(origin_quat),
+                    "rgba": format_vec(rgba),
+                    "contype": "0",
+                    "conaffinity": "0",
+                },
+            )
+        elif geom_elem.find("capsule") is not None:
+            capsule = geom_elem.find("capsule")
+            assert capsule is not None
+            radius = float(capsule.attrib["radius"])
+            length = float(capsule.attrib["length"])
+            geom = (
+                "capsule",
+                {
+                    "size": format_vec((radius, length * 0.5)),
+                    "pos": format_vec(origin_xyz),
+                    "quat": format_vec(origin_quat),
+                    "rgba": format_vec(rgba),
+                    "contype": "0",
+                    "conaffinity": "0",
+                },
+            )
+        else:
+            warnings.warn("skip unsupported visual geometry")
+
+        if geom is not None:
+            geoms.append(geom)
+
+    return geoms
+
+
+def build_mjcf(
+    model: RobotModel,
+    spawn_xyz: Tuple[float, float, float],
+    spawn_yaw: float,
+    export_dir: Path,
+) -> str:
     links, child_map, inertials, root_link_name = parse_urdf(model.urdf_path)
+    tree = ET.parse(model.urdf_path)
+    robot = tree.getroot()
+    materials = parse_materials(robot)
     root_quat = rpy_to_quat(0.0, 0.0, spawn_yaw)
 
     mujoco_root = ET.Element("mujoco", model=model.package_name)
-    ET.SubElement(mujoco_root, "compiler", angle="radian", coordinate="local", discardvisual="true")
+    ET.SubElement(mujoco_root, "compiler", angle="radian", coordinate="local", discardvisual="false")
     ET.SubElement(
         mujoco_root,
         "option",
@@ -321,7 +524,9 @@ def build_mjcf(model: RobotModel, spawn_xyz: Tuple[float, float, float], spawn_y
     )
     ET.SubElement(default, "joint", damping="1", armature="0.01")
 
-    ET.SubElement(mujoco_root, "visual")
+    asset_root = ET.SubElement(mujoco_root, "asset")
+    mesh_assets: Dict[Tuple[str, Tuple[float, float, float]], str] = {}
+
     worldbody = ET.SubElement(mujoco_root, "worldbody")
     ET.SubElement(
         worldbody,
@@ -363,6 +568,9 @@ def build_mjcf(model: RobotModel, spawn_xyz: Tuple[float, float, float], spawn_y
             )
 
         for geom_type, geom_attrs in collision_geoms(link):
+            ET.SubElement(body, "geom", type=geom_type, **geom_attrs)
+
+        for geom_type, geom_attrs in visual_geoms(link, model.package_dir, materials, asset_root, mesh_assets, export_dir):
             ET.SubElement(body, "geom", type=geom_type, **geom_attrs)
 
         for joint in child_map.get(link_name, []):
@@ -443,20 +651,22 @@ def main() -> int:
     print(f"Selected: {selected.display_name}")
     print(f"URDF: {selected.urdf_path}")
 
-    xml_string = build_mjcf(selected, (args.x, args.y, args.z), args.yaw)
-    mj_model = mujoco.MjModel.from_xml_string(xml_string)
-    print(f"Compiled MuJoCo model: bodies={mj_model.nbody}, joints={mj_model.njnt}, geoms={mj_model.ngeom}")
+    with tempfile.TemporaryDirectory(prefix=f"mujoco_assets_{selected.package_name}_") as asset_dir_name:
+        asset_dir = Path(asset_dir_name)
+        xml_string = build_mjcf(selected, (args.x, args.y, args.z), args.yaw, asset_dir)
+        mj_model = mujoco.MjModel.from_xml_string(xml_string)
+        print(f"Compiled MuJoCo model: bodies={mj_model.nbody}, joints={mj_model.njnt}, geoms={mj_model.ngeom}")
 
-    if args.compile_only:
-        return 0
+        if args.compile_only:
+            return 0
 
-    mj_data = mujoco.MjData(mj_model)
+        mj_data = mujoco.MjData(mj_model)
 
-    mj_data.qpos[0:3] = np.array([args.x, args.y, args.z], dtype=float)
-    mj_data.qpos[3:7] = np.array(rpy_to_quat(0.0, 0.0, args.yaw), dtype=float)
-    mujoco.mj_forward(mj_model, mj_data)
+        mj_data.qpos[0:3] = np.array([args.x, args.y, args.z], dtype=float)
+        mj_data.qpos[3:7] = np.array(rpy_to_quat(0.0, 0.0, args.yaw), dtype=float)
+        mujoco.mj_forward(mj_model, mj_data)
 
-    run_viewer(mj_model, mj_data, (args.x, args.y, args.z + 0.1))
+        run_viewer(mj_model, mj_data, (args.x, args.y, args.z + 0.1))
     return 0
 
 
